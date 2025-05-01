@@ -488,13 +488,13 @@ str_hubs_bckt_timer_service(str_hubs_bckt_p shbskt, str_hub_p str_hub,
 		TAILQ_FOREACH_SAFE(strh_cli, &str_hub->cli_head, next, strh_cli_temp) {
 			if (((time_t)str_hub->s.skt_opts.snd_timeout + strh_cli->last_snd_time) <
 			    ts->tv_sec) { /* Report about send timeout. */
-				strh_cli_send_ready_cb(strh_cli->tptask,
-				    ETIMEDOUT, 0, 0, strh_cli);
 				SYSLOGD_EX(LOG_DEBUG,
 				    "ETIMEDOUT: snd_timeout = %zu, tv_sec = %lu, last_snd_time = %lu.",
 				    str_hub->s.skt_opts.snd_timeout,
 				    ts->tv_sec,
-				    strh_cli->last_snd_time);
+				    strh_cli->last_snd_time); /* Report before! */
+				strh_cli_send_ready_cb(strh_cli->tptask,
+				    ETIMEDOUT, 0, 0, strh_cli);
 			}
 		}
 	}
