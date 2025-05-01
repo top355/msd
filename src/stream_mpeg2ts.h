@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2012 - 2021 Rozhuk Ivan <rozhuk.im@gmail.com>
+ * Copyright (c) 2012-2025 Rozhuk Ivan <rozhuk.im@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -173,7 +173,7 @@ int	mpeg2_ts_data_alloc(mpeg2_ts_data_p *m2ts_ret, mpeg2_ts_settings_p s);
 void	mpeg2_ts_data_free(mpeg2_ts_data_p m2ts);
 
 size_t	mpeg2_ts_pkt_analize(mpeg2_ts_data_p m2ts, r_buf_p r_buf,
-	    struct timespec *ts, uint8_t *buf, size_t buf_size, int *pkt_added);
+	    const struct timespec *ts, uint8_t *buf, size_t buf_size, int *pkt_added);
 
 
 int	mpeg2_ts_txt_dump(mpeg2_ts_data_p m2ts, uint8_t *buf, size_t buf_size,

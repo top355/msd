@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2012-2024 Rozhuk Ivan <rozhuk.im@gmail.com>
+ * Copyright (c) 2012-2025 Rozhuk Ivan <rozhuk.im@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -94,7 +94,7 @@ int	mpeg2_ts_psi_analize(mpeg2_ts_data_p m2ts, mpeg2_ts_prog_p prog,
 int	mpeg2_ts_pid_psi_serialize(mpeg2_ts_data_p m2ts, mpeg2_ts_pid_p ts_pid);
 
 int	mpeg2_ts_key_frames_idx_add(mpeg2_ts_data_p m2ts,
-	    struct timespec *ts, r_buf_p r_buf, r_buf_rpos_p rpos);
+	    const struct timespec *ts, r_buf_p r_buf, r_buf_rpos_p rpos);
 
 int	mpeg2_ts_descriptors_dump(uint8_t *data, size_t data_size,
 	    uint8_t *buf, size_t buf_size, size_t *buf_size_ret);
@@ -1261,7 +1261,7 @@ mpeg2_ts_pid_psi_serialize(mpeg2_ts_data_p m2ts, mpeg2_ts_pid_p ts_pid) {
 
 
 int
-mpeg2_ts_key_frames_idx_add(mpeg2_ts_data_p m2ts, struct timespec *ts,
+mpeg2_ts_key_frames_idx_add(mpeg2_ts_data_p m2ts, const struct timespec *ts,
     r_buf_p r_buf, r_buf_rpos_p rpos) {
 	int error;
 	size_t i, allocated;
@@ -1303,8 +1303,8 @@ mpeg2_ts_key_frames_idx_add(mpeg2_ts_data_p m2ts, struct timespec *ts,
 
 
 size_t
-mpeg2_ts_pkt_analize(mpeg2_ts_data_p m2ts, r_buf_p r_buf, struct timespec *ts,
-    uint8_t *buf, size_t buf_size, int *pkt_added) {
+mpeg2_ts_pkt_analize(mpeg2_ts_data_p m2ts, r_buf_p r_buf,
+    const struct timespec *ts, uint8_t *buf, size_t buf_size, int *pkt_added) {
 	int error, cc_incorrect = 0, is_psi = 0;
 	uint16_t pid;
 	size_t i, error_count = 0;
