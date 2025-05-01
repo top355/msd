@@ -42,7 +42,7 @@ git clone --recursive https://github.com/rozhuk-im/msd.git
 cd msd
 mkdir build
 cd build
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=true ..
 make -j 8
 ```
 
