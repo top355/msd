@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2012-2024 Rozhuk Ivan <rozhuk.im@gmail.com>
+ * Copyright (c) 2012-2025 Rozhuk Ivan <rozhuk.im@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -64,8 +64,9 @@
 #include "stream_src.h"
 
 
-#define STR_SRC_UDP_PKT_SIZE_STD	1500
-#define STR_SRC_UDP_PKT_SIZE_MAX	65612 /* 349 * 188 */
+#define STR_SRC_UDP_PKT_SIZE_STD	1500	/* Standart size. */
+#define STR_SRC_UDP_PKT_SIZE_JUMBO16	16384	/* Get ready to receive jumbo frames. */
+#define STR_SRC_UDP_PKT_SIZE_MAX	65612	/* 349 * 188 */
 
 
 void	str_src_init(str_src_p src);
@@ -87,10 +88,10 @@ static int str_src_recv_mc_cb(tp_task_p tptask, int error, uint32_t eof,
 	    size_t data2transfer_size, void *arg);
 
 void	str_src_r_buf_f_name_gen(str_src_p src);
-int	str_src_r_buf_alloc(str_src_p src);
+int	str_src_r_buf_alloc(str_src_p src, const int keep_tail_data);
 void	str_src_r_buf_free(str_src_p src);
-int	str_src_r_buf_add(str_src_p src, struct timespec *ts,
-	    uint8_t *buf, size_t buf_size);
+int	str_src_r_buf_add(str_src_p src, const struct timespec *ts,
+	    uint8_t *buf, size_t buf_size, size_t *tail_size);
 
 int	str_src_state_update(str_src_p src, uint32_t state, int sset, uint32_t status);
 #define SRC_STATUS_CLR_BIT	1 /* Clear bits. */
@@ -1027,10 +1028,10 @@ str_src_recv_http_cb(tp_task_p tptask, int error, uint32_t eof,
 	str_src_p src = arg;
 	uintptr_t ident;
 	ssize_t ios;
-	uint8_t *buf, *ptm, *ptm2;
-	size_t transfered_size = 0, buf_size;
+	uint8_t *buf, *ptm;
+	const uint8_t *te;
+	size_t transfered_size = 0, buf_size, te_size;
 	http_resp_line_data_t resp_data;
-	struct timespec	ts;
 
 	SYSLOGD_EX(LOG_DEBUG, "...");
 
@@ -1049,7 +1050,7 @@ err_out:
 		return (TP_TASK_CB_NONE); /* Receiver destroyed. */
 	}
 	if (NULL == src->r_buf) { /* Delay ring buf allocation. */
-		error = str_src_r_buf_alloc(src);
+		error = str_src_r_buf_alloc(src, 1);
 		if (0 != error)
 			goto err_out;
 		error = str_src_state_update(src, STR_SRC_STATE_RUNNING, 0, 0);
@@ -1059,7 +1060,10 @@ err_out:
 
 	ident = tp_task_ident_get(tptask);
 	while (transfered_size < data2transfer_size) { /* recv loop. */
-		buf_size = r_buf_wbuf_get(src->r_buf, MPEG2_TS_PKT_SIZE_MAX, &buf);
+		/* r_buf handles inside data move from tail to head on round 
+		 * complete, so r_buf_w_off is always valid. */
+		buf_size = r_buf_wbuf_get(src->r_buf,
+		    (src->r_buf_w_off + 4096), &buf); /* Min size for HTTP resp headers. */
 		ios = recv((int)ident, (buf + src->r_buf_w_off),
 		    (buf_size - src->r_buf_w_off), MSG_DONTWAIT);
 		if (-1 == ios) {
@@ -1074,7 +1078,7 @@ err_out:
 			break;
 		transfered_size += (size_t)ios;
 		src->r_buf_w_off += (size_t)ios;
-		ptm = mem_find_cstr(buf, src->r_buf_w_off, "\r\n\r\n");
+		ptm = mem_find_cstr(buf, src->r_buf_w_off, CRLFCRLF);
 		if (NULL == ptm)
 			continue;
 		// XXX
@@ -1082,27 +1086,37 @@ err_out:
 		if (0 != error)
 			break;
 		src->http_resp_code = resp_data.status_code;
+		/* Transfer encoding support. */
+		src->http_te = HTTP_REQ_TE_NONE;
+		if (0 == http_hdr_val_get(buf, (size_t)(ptm - buf),
+		    (const uint8_t*)"transfer-encoding", 17, &te, &te_size)) {
+			src->http_te = http_get_transfer_encoding_fast(te, te_size);
+		}
+		switch (src->http_te) {
+		case HTTP_REQ_TE_NONE: /* No TE - OK!. */
+			ptm += 4; /* CRLFCRLF */
+			break;
+		case HTTP_REQ_TE_CHUNKED:
+			ptm += 2; /* CRLF */
+			SYSLOGD_EX(LOG_DEBUG, "transfer-encoding: chunked "
+			    "detected, this is not optimal for performance.");
+			break;
+		default:
+			syslog(LOG_ERR, "Unsupported transfer encoding!: %.*s",
+			    (int)te_size,te);
+			error = EPROTONOSUPPORT;
+			goto err_out;
+		}
 
-		ptm[0] = 0;
-		ptm += 4;
 		SYSLOGD_EX(LOG_DEBUG, "ans in: size = %zu, off = %zu"
 		    "\n==========================================="
-		    "\n%s"
+		    "\n%.*s"
 		    "\n===========================================",
-		    src->r_buf_w_off, ios, buf);
-		ptm2 = ptm;
-		if (0 != mpeg2_ts_pkt_get_next(buf, src->r_buf_w_off,
-		    (size_t)(ptm - buf), MPEG2_TS_PKT_SIZE_188, &ptm)) {
-			if (ptm != ptm2) {
-				SYSLOGD_EX(LOG_DEBUG, "!!!!!!!!ptm != ptm2!!!!!!!!!!");
-			}
-			buf_size = (size_t)((buf + src->r_buf_w_off) - ptm);
-			memmove(buf, ptm, buf_size);
-			clock_gettime(CLOCK_MONOTONIC_FAST, &ts);
-			str_src_r_buf_add(src, &ts, buf, buf_size);
-		} else { /* Drop data. */
-			src->r_buf_w_off = 0;
-		}
+		    src->r_buf_w_off, ios, (int)(ptm - buf),buf);
+		/* Remove HTTP header. */
+		src->r_buf_w_off -= (ptm - buf);
+		memmove(buf, ptm, src->r_buf_w_off);
+		/* Switch to tcp stream receive. */
 		tp_task_cb_func_set(tptask, (tp_task_cb)str_src_recv_tcp_cb);
 		break;
 	} /* end recv while */
@@ -1127,7 +1141,7 @@ str_src_recv_tcp_cb(tp_task_p tptask, int error, uint32_t eof,
 	uintptr_t ident;
 	ssize_t ios;
 	uint8_t *buf;
-	size_t transfered_size = 0, buf_size, tm;
+	size_t transfered_size = 0, buf_size, chunk_sz, chunk_mrk_sz, tm;
 	struct timespec	ts;
 
 	if (0 != error || 0 != eof) {
@@ -1145,7 +1159,7 @@ err_out:
 		return (TP_TASK_CB_NONE); /* Receiver destroyed. */
 	}
 	if (NULL == src->r_buf) { /* Delay ring buf allocation. */
-		error = str_src_r_buf_alloc(src);
+		error = str_src_r_buf_alloc(src, 1);
 		if (0 != error)
 			goto err_out;
 		error = str_src_state_update(src, STR_SRC_STATE_RUNNING, 0, 0);
@@ -1156,7 +1170,10 @@ err_out:
 	clock_gettime(CLOCK_MONOTONIC_FAST, &ts);
 	ident = tp_task_ident_get(tptask);
 	while (transfered_size < data2transfer_size) { /* recv loop. */
-		buf_size = r_buf_wbuf_get(src->r_buf, MPEG2_TS_PKT_SIZE_MAX, &buf);
+		/* r_buf handles inside data move from tail to head on round 
+		 * complete, so r_buf_w_off is always valid. */
+		buf_size = r_buf_wbuf_get(src->r_buf,
+		    (src->r_buf_w_off + (MPEG2_TS_PKT_SIZE_MAX * 2)), &buf);
 		tm = buf_size;
 		buf_size -= (src->r_buf_w_off + (buf_size % MPEG2_TS_PKT_SIZE_188));
 		ios = recv((int)ident, (buf + src->r_buf_w_off), buf_size, MSG_DONTWAIT);
@@ -1182,14 +1199,40 @@ err_out:
 			break;
 		}
 		transfered_size += (size_t)ios;
-		ios += src->r_buf_w_off;
+		ios += src->r_buf_w_off; /* Buf used size. */
 		if (MPEG2_TS_PKT_SIZE_188 > (size_t)ios) {
 			src->r_buf_w_off = (size_t)ios;
-			SYSLOGD_EX(LOG_DEBUG, "...r_buf_w_off = %zu.",
-			    src->r_buf_w_off);
+			SYSLOGD_EX(LOG_DEBUG, "...r_buf_w_off = %zu, data2transfer_size = %zu, transfered_size = %zu.",
+			    src->r_buf_w_off, data2transfer_size, transfered_size);
 			continue; /* Packet to small, continue receive. */
 		}
-		str_src_r_buf_add(src, &ts, buf, (size_t)ios);
+		if (HTTP_REQ_TE_CHUNKED == src->http_te) {
+chunk_retry:
+			if (src->http_te_chunk < ios) {
+				if (16 > (ios - src->http_te_chunk)) {
+					src->r_buf_w_off = (size_t)ios;
+					continue; /* Assume that chunk marker may be incomplete, continue receive. */
+				}
+				if (0 != http_data_chunked_size((buf + src->http_te_chunk),
+				    (ios - src->http_te_chunk), &chunk_sz, &chunk_mrk_sz)) {
+					syslog(LOG_ERR, "HTTP chunk marker error.");
+					error = EMSGSIZE;
+					goto err_out;
+				}
+				// if (0 == chunk_sz) /* EOF - do not handle here. */
+				/* Remove chunk marker from data stream.*/
+				tm = (src->http_te_chunk + chunk_mrk_sz); /* New chunk data offset. */
+				memmove((buf + src->http_te_chunk),
+				    (buf + tm), (ios - tm));
+				ios -= chunk_mrk_sz; /* Decrease buf used size. */
+				src->http_te_chunk += chunk_sz; /* Increase chunk offset. */
+				/* Process next chunk. */
+				goto chunk_retry;
+			}
+		}
+		str_src_r_buf_add(src, &ts, buf, (size_t)ios, &src->r_buf_w_off);
+		/* Count only processed data to keep http_te_chunk correct offset. */
+		src->http_te_chunk -= (ios - src->r_buf_w_off);
 	} /* end recv while */
 
 	/* Calc speed. */
@@ -1227,7 +1270,7 @@ err_out:
 		return (TP_TASK_CB_NONE); /* Receiver destroyed. */
 	}
 	if (NULL == src->r_buf) { /* Delay ring buf allocation. */
-		error = str_src_r_buf_alloc(src);
+		error = str_src_r_buf_alloc(src, 0);
 		if (0 != error)
 			goto err_out;
 		error = str_src_state_update(src, STR_SRC_STATE_RUNNING, 0, 0);
@@ -1249,7 +1292,11 @@ err_out:
 			error = SKT_ERR_FILTER(error);
 			if (0 == error && STR_SRC_UDP_PKT_SIZE_MAX > buf_size) {
 				/* Possible not enough buf space. */
-				req_buf_size = STR_SRC_UDP_PKT_SIZE_MAX;
+				if (STR_SRC_UDP_PKT_SIZE_JUMBO16 > req_buf_size) {
+					req_buf_size = STR_SRC_UDP_PKT_SIZE_JUMBO16;
+				} else {
+					req_buf_size = STR_SRC_UDP_PKT_SIZE_MAX;
+				}
 				continue; /* Retry! */
 			}
 			break;
@@ -1283,14 +1330,18 @@ err_out:
 			buf_size = (size_t)((size_t)ios - (start_off + end_off));
 			if (MPEG2_TS_PKT_SIZE_MIN > buf_size)
 				continue; /* Packet to small, drop. */
-			/* Prevent fragmentation, zero move: buf += start_off; */
 			/* Remove rtp header. */
+#if 1
+			/* Prevent fragmentation. */
 			memmove(buf, (buf + start_off), buf_size);
+#else
+			buf += start_off; /* Zero move. */
+#endif
 		} else {
 			src->error_count ++;
 			continue; /* Packet unknown, drop. */
 		}
-		str_src_r_buf_add(src, &ts, buf, buf_size);
+		str_src_r_buf_add(src, &ts, buf, buf_size, NULL);
 	} /* end recv while */
 	if (0 != error) {
 		SYSLOG_ERR(LOG_NOTICE, error, "recv().");
@@ -1340,7 +1391,7 @@ str_src_r_buf_f_name_gen(str_src_p src) {
 }
 
 int
-str_src_r_buf_alloc(str_src_p src) {
+str_src_r_buf_alloc(str_src_p src, const int keep_tail_data) {
 	int error;
 
 	if (NULL == src)
@@ -1388,7 +1439,8 @@ err_out:
 		}
 	}
 	src->r_buf = r_buf_alloc(src->r_buf_fd, src->s.ring_buf_size,
-	    MPEG2_TS_PKT_SIZE_MIN);
+	    MPEG2_TS_PKT_SIZE_MIN,
+	    ((0 != keep_tail_data) ? RBUF_F_U_KEEP_TAIL : 0));
 	if (NULL == src->r_buf) {
 		error = ENOMEM;
 		SYSLOG_ERR(LOG_ERR, error, "r_buf_alloc().");
@@ -1416,28 +1468,36 @@ str_src_r_buf_free(str_src_p src) {
 	src->r_buf = NULL;
 }
 
+
 int
-str_src_r_buf_add(str_src_p src, struct timespec *ts,
-    uint8_t *buf, size_t buf_size) {
+str_src_r_buf_add(str_src_p src, const struct timespec *ts,
+    uint8_t *buf, size_t buf_size, size_t *tail_size) {
 	int pkt_added;
-	uint8_t *cur_pkt, *expected_pkt, *buf_end;
+	uint8_t *cur_pkt, *prev_pkt, *expected_pkt, *buf_end;
 	size_t tm;
 
 	if (MPEG2_TS_PKT_SIZE_188 > buf_size) { /* Data to small? */
-		src->r_buf_w_off = buf_size;
+		if (NULL != tail_size) {
+			(*tail_size) = buf_size;
+		}
 		return (0);
 	}
 	cur_pkt = buf;
+	prev_pkt = buf;
 	expected_pkt = buf;
 	buf_end = (buf + buf_size);
 	while (0 != mpeg2_ts_pkt_get_next(buf, buf_size,
-	    (size_t)(cur_pkt - buf), MPEG2_TS_PKT_SIZE_188, &cur_pkt)) {
+	    (size_t)(expected_pkt - buf), MPEG2_TS_PKT_SIZE_188, &cur_pkt)) {
 		if (expected_pkt < cur_pkt) { /* Damaged stream. */
-			memmove(expected_pkt, cur_pkt, (size_t)(buf_end - cur_pkt));
 			tm = (size_t)(cur_pkt - expected_pkt);
+			syslog(LOG_INFO, "MPEG2-TS packets damaged, lost data~: %zu", tm);
+#if 1
+			/* Move data to avoid r_buf fragmentation. */
+			memmove(expected_pkt, cur_pkt, (size_t)(buf_end - cur_pkt));
 			buf_end -= tm;
 			buf_size -= tm;
 			cur_pkt = expected_pkt;
+#endif
 			src->error_count ++;
 		}
 		if (0 != (STR_SRC_S_F_M2TS_ANALYZING & src->s.flags)) {
@@ -1447,7 +1507,9 @@ str_src_r_buf_add(str_src_p src, struct timespec *ts,
 			    cur_pkt, MPEG2_TS_PKT_SIZE_188, &pkt_added);
 			if (0 == pkt_added) { /* Packet skiped. */
 				if (buf_end <= (cur_pkt + MPEG2_TS_PKT_SIZE_188)) {
-					src->r_buf_w_off = 0;
+					if (NULL != tail_size) {
+						(*tail_size) = 0;
+					}
 					return (0);
 				}
 				memmove(cur_pkt, (cur_pkt + MPEG2_TS_PKT_SIZE_188),
@@ -1459,10 +1521,14 @@ str_src_r_buf_add(str_src_p src, struct timespec *ts,
 		} else {
 			r_buf_wbuf_set2(src->r_buf, cur_pkt, MPEG2_TS_PKT_SIZE_188, NULL);
 		}
-		cur_pkt += MPEG2_TS_PKT_SIZE_188;
-		expected_pkt += MPEG2_TS_PKT_SIZE_188;
+		prev_pkt = cur_pkt;
+		expected_pkt = (cur_pkt + MPEG2_TS_PKT_SIZE_188);
 	}
-	src->r_buf_w_off = (size_t)(buf_end - cur_pkt);
+
+	if (NULL != tail_size) {
+		(*tail_size) = (size_t)(buf_end - (prev_pkt + MPEG2_TS_PKT_SIZE_188));
+	}
+
 	return (0);
 }
 

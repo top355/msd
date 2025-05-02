@@ -164,6 +164,8 @@ typedef struct str_src_s {
 	uint32_t	state;		/* Source State. */
 	int		last_err;	/* Last errno. */
 	uint32_t	http_resp_code;	/* Last http error code. */
+	int		http_te;	/* HTTP transfer encoding. */
+	size_t		http_te_chunk;	/* transfer encoding chunk size. */
 	uint32_t	rtp_sn;		/* Continuity/Sequence number. */
 	uint64_t	rtp_sn_errors;	/* Count Continuity/Sequence number errors. */
 

@@ -49,10 +49,6 @@
     <File Name="src/stream_mpeg2ts.h"/>
     <File Name="src/stream_src.c"/>
     <File Name="src/stream_src.h"/>
-    <File Name="src/src_dvb.c"/>
-    <File Name="src/src_dvb.h"/>
-    <File Name="src/dvb_fe.c"/>
-    <File Name="src/dvb_fe.h"/>
     <File Name="src/CMakeLists.txt"/>
     <VirtualDirectory Name="liblcb">
       <VirtualDirectory Name="src">
